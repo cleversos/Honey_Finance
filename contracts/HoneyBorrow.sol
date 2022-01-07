@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Unlicense
-pragma solidity 0.8.7;
+pragma solidity ^0.8.7;
 
 interface IERC165 {
     /**
@@ -256,10 +256,6 @@ interface IERC20 {
 }
 
 contract HoneyBorrow {
-    uint256 private borrowRate;
-    uint256 private interestRate;
-    uint256 private limitRate;
-
     address private admin;
 
     address private avaxAddress;
@@ -271,6 +267,10 @@ contract HoneyBorrow {
         uint256 stakeTime;
         uint256 stakeAmount;
     }
+
+    mapping(address => uint256) private borrowRate;
+    mapping(address => uint256) private interestRate;
+    mapping(address => uint256) private limitRate;
 
     mapping(address => bool) public status;
     mapping(address => BorrowTicket[]) public accountTickets;
@@ -305,7 +305,7 @@ contract HoneyBorrow {
         );
 
         // Get the borrowAmount by calculating with the borrowRate
-        uint256 borrowAmount = getBorrowAmount(oraclePrice);
+        uint256 borrowAmount = getBorrowAmount(NFTaddress, oraclePrice);
 
         // Borrow AVAX to this account with borrowAmount
         IERC20(avaxAddress).transfer(msg.sender, borrowAmount);
@@ -330,9 +330,9 @@ contract HoneyBorrow {
         uint256 payAmount = bt.stakeAmount;
 
         // Get the multiplier from the this time and stakeTime
-        uint256 multiplier = getMultiplier(startTime);
+        uint256 multiplier = getMultiplier(NFTaddr, startTime);
 
-        require(multiplier < limitRate, "LR"); // The multiplier is must be less than LimitRate
+        require(multiplier < limitRate[NFTaddr], "LR"); // The multiplier is must be less than LimitRate
 
         // Get the repay Amount by stakeAmount and Multiplier
         payAmount = (payAmount * multiplier) / 10000;
@@ -380,11 +380,16 @@ contract HoneyBorrow {
 
     /**
      * @notice Get the multiplier by using timediff
+     * @param collection the collection address
      * @param startTime the staked starttime
      * @return borrowamount that the user can borrow
      */
-    function getMultiplier(uint256 startTime) public view returns (uint256) {
-        uint256 multi = (interestRate - 100 * 100) *
+    function getMultiplier(address collection, uint256 startTime)
+        public
+        view
+        returns (uint256)
+    {
+        uint256 multi = (interestRate[collection] - 100 * 100) *
             (block.timestamp / 1 days - startTime / 1 days) +
             10000;
         return multi;
@@ -392,12 +397,17 @@ contract HoneyBorrow {
 
     /**
      * @notice Get the BorrowAmount by calculating with borrowRate
+     * @param collection The collection address
      * @param amount The oracle Price of NFT release by AVAX
      * @return borrowamount that the user can borrow
      */
-    function getBorrowAmount(uint256 amount) internal view returns (uint256) {
+    function getBorrowAmount(address collection, uint256 amount)
+        internal
+        view
+        returns (uint256)
+    {
         require(amount > 0, "OZ"); // amount must be over Zero
-        uint256 bamount = (amount * borrowRate) / 10000;
+        uint256 bamount = (amount * borrowRate[collection]) / 10000;
         return bamount;
     }
 
@@ -405,35 +415,60 @@ contract HoneyBorrow {
      * @notice Add collections to use only them for Lending/Borrowing
      * @dev Reverts upon any failure
      * @param addresses[] Add addresses to use them for Lending/Borrowing
+     * @param borrow[] Add borrowRate with the addresses to set borrowRate[addresses[i]]
+     * @param interest[] Add interestRate with the addresses to set interestRate[addresses[i]]
+     * @param limit[] Add limitRate with the addresses to set limitRate[addresses[i]]
      */
-    function addCollection(address[] calldata addresses) external {
+    function addCollection(
+        address[] calldata addresses,
+        uint256[] calldata borrow,
+        uint256[] calldata interest,
+        uint256[] calldata limit
+    ) external {
         for (uint256 i = 0; i < addresses.length; i++) {
-            if (status[addresses[i]] == false) status[addresses[i]] = true;
+            if (status[addresses[i]] == false) {
+                status[addresses[i]] = true;
+                borrowRate[addresses[i]] = borrow[i];
+                interestRate[addresses[i]] = interest[i];
+                limitRate[addresses[i]] = limit[i];
+            }
         }
     }
 
     /**
      * @notice Set the BorrowAmount by only admin set
+     * @param collection The collection address
      * @param newBorrowRate New BorrowRate
      */
-    function setBorrowRate(uint256 newBorrowRate) external onlyAdmin {
-        borrowRate = newBorrowRate;
+    function setBorrowRate(address collection, uint256 newBorrowRate)
+        external
+        onlyAdmin
+    {
+        borrowRate[collection] = newBorrowRate;
     }
 
     /**
      * @notice Set the interestRate by only admin set
+     * @param collection The collection address
      * @param newInterestRate New InterestRate
      */
-    function setInterestRate(uint256 newInterestRate) external onlyAdmin {
-        interestRate = newInterestRate;
+    function setInterestRate(address collection, uint256 newInterestRate)
+        external
+        onlyAdmin
+    {
+        interestRate[collection] = newInterestRate;
     }
 
     /**
-     * @notice Set the limitAmount by only admin set
+     * @notice Set the limitAmount by only admin
+     * @param collection The collection address
      * @param newLimitRate New LimitRate
      */
-    function setLimitRate(uint256 newLimitRate) external onlyAdmin {
-        limitRate = newLimitRate;
+    function setLimitRate(address collection, uint256 newLimitRate)
+        external
+        onlyAdmin
+    {
+        limitRate[collection] = newLimitRate;
     }
 
     /*** Admin role ***/
