@@ -266,17 +266,24 @@ contract HoneyBorrow {
         uint256 tokenId;
         uint256 stakeTime;
         uint256 stakeAmount;
+        uint256 borrowAvailableAmount;
+        uint256 borrowedAmount;
     }
 
+    address[] public collections;
+    mapping(address => bool) public status;
     mapping(address => uint256) private borrowRate;
     mapping(address => uint256) private interestRate;
     mapping(address => uint256) private limitRate;
 
-    mapping(address => bool) public status;
     mapping(address => BorrowTicket[]) public accountTickets;
 
     constructor() {
         admin = msg.sender;
+    }
+
+    function getAccountTicketCount(address owner) external view returns(uint256) {
+        return accountTickets[owner].length;
     }
 
     /**
@@ -285,7 +292,11 @@ contract HoneyBorrow {
      * @param NFTaddress The contract address of the NFT
      * @param tokenId The NFT tokenId which is will be supplied
      */
-    function stake(address NFTaddress, uint256 tokenId) external {
+    function stake(
+        address NFTaddress,
+        uint256 tokenId,
+        uint256 borrowAmount
+    ) external payable {
         require(status[NFTaddress] == true, "ND"); // Not available to deposit
 
         // Get the price of NFT from Oracle -
@@ -294,30 +305,61 @@ contract HoneyBorrow {
         // Transfer the selected NFT to this contract
         IERC721(NFTaddress).transferFrom(msg.sender, address(this), tokenId);
 
+        // Get the borrowAmount by calculating with the borrowRate
+        uint256 maxBorrowAmount = getBorrowAmount(NFTaddress, oraclePrice);
+
         // Push the data of BorrowTicket into the accountTickets of this account
         accountTickets[msg.sender].push(
             BorrowTicket({
                 collectionAddress: NFTaddress,
                 tokenId: tokenId,
                 stakeTime: block.timestamp,
-                stakeAmount: oraclePrice
+                stakeAmount: oraclePrice,
+                borrowAvailableAmount: maxBorrowAmount,
+                borrowedAmount: borrowAmount
             })
         );
 
-        // Get the borrowAmount by calculating with the borrowRate
-        uint256 borrowAmount = getBorrowAmount(NFTaddress, oraclePrice);
+        // Borrow AVAX to this account with borrowAmount
+        payable(msg.sender).transfer(borrowAmount);
+    }
+
+    function reStake(uint256 cid, uint256 addBorrowAmount) external payable {
+        require(accountTickets[msg.sender].length > cid, "MB"); //This NFT must be staked in this contract
+
+        // Get the struct BorrowTicket bt by using address and cid
+        BorrowTicket memory bt = accountTickets[msg.sender][cid];
+
+        // Set the variables from the struct bt which is defined by address and Cid
+        address NFTaddr = bt.collectionAddress;
+        uint256 startTime = bt.stakeTime;
+        uint256 max = bt.borrowAvailableAmount;
+        uint256 payAmount = bt.borrowedAmount;
+
+        // Get the multiplier from the this time and stakeTime
+        uint256 multiplier = getMultiplier(NFTaddr, startTime);
+
+        // Get the repay Amount by stakeAmount and Multiplier
+        payAmount = (payAmount * multiplier) / 10000;
+
+        require(max > addBorrowAmount + payAmount, "OM"); // The borrowedAmount is over Max
 
         // Borrow AVAX to this account with borrowAmount
-        IERC20(avaxAddress).transfer(msg.sender, borrowAmount);
+        payable(msg.sender).transfer(addBorrowAmount);
+
+        // Set new parameters of this array data
+        accountTickets[msg.sender][cid].borrowedAmount =
+            addBorrowAmount +
+            payAmount;
+        accountTickets[msg.sender][cid].stakeTime = block.timestamp;
     }
 
     /**
      * @notice The borrower repay the AVAX and receive the NFT again
      * @dev Reverts upon any failure
-     * @param amount The amount of AVAX the borrower spend to receive the NFT again
      * @param cid The NFT Id of the unique sequence
      */
-    function repay(uint256 amount, uint256 cid) external {
+    function repay(uint256 cid) external payable {
         require(accountTickets[msg.sender].length > cid, "MB"); //This NFT must be staked in this contract
 
         // Get the struct BorrowTicket bt by using address and cid
@@ -327,7 +369,7 @@ contract HoneyBorrow {
         address NFTaddr = bt.collectionAddress;
         uint256 tokenId = bt.tokenId;
         uint256 startTime = bt.stakeTime;
-        uint256 payAmount = bt.stakeAmount;
+        uint256 payAmount = bt.borrowedAmount;
 
         // Get the multiplier from the this time and stakeTime
         uint256 multiplier = getMultiplier(NFTaddr, startTime);
@@ -337,10 +379,10 @@ contract HoneyBorrow {
         // Get the repay Amount by stakeAmount and Multiplier
         payAmount = (payAmount * multiplier) / 10000;
 
-        require(payAmount <= amount, "OP"); // The amount of AVAX must be over payAmount
+        require(payAmount <= msg.value, "OP"); // The amount of AVAX must be over payAmount
 
         // The borrower repay the AVAX to this contract
-        IERC20(avaxAddress).transferFrom(msg.sender, address(this), amount);
+        // IERC20(avaxAddress).transferFrom(msg.sender, address(this), amount);
 
         // Send the NFT again to its owner
         IERC721(NFTaddr).transferFrom(address(this), msg.sender, tokenId);
@@ -424,9 +466,10 @@ contract HoneyBorrow {
         uint256[] calldata borrow,
         uint256[] calldata interest,
         uint256[] calldata limit
-    ) external {
+    ) external onlyAdmin{
         for (uint256 i = 0; i < addresses.length; i++) {
             if (status[addresses[i]] == false) {
+                collections.push(addresses[i]);
                 status[addresses[i]] = true;
                 borrowRate[addresses[i]] = borrow[i];
                 interestRate[addresses[i]] = interest[i];
@@ -434,6 +477,38 @@ contract HoneyBorrow {
             }
         }
     }
+
+    function getCollections() external view returns (address[] memory) {
+        return collections;
+    }
+
+    function deleteCollection(address[] calldata addresses) external onlyAdmin{
+        for (uint256 i = 0; i < addresses.length; i++) {
+            removeCollection(addresses[i]);
+            if (status[addresses[i]] == true) status[addresses[i]] = false;
+        }
+    }
+
+    function removeCollection(address collection)
+        internal
+    {
+        uint256 length = collections.length;
+        bool bFound = false;
+        for (uint256 i = 0; i < length; i++){
+            if(collections[i] == collection)
+            {
+                collections[i] = collections[length - 1];
+                bFound = true;
+                break;
+            }
+        }
+        if(bFound == false)
+            return;
+
+        delete collections[length - 1];
+        collections.pop();
+    }
+
 
     /**
      * @notice Set the BorrowAmount by only admin set
@@ -471,6 +546,20 @@ contract HoneyBorrow {
         limitRate[collection] = newLimitRate;
     }
 
+    function getRates(address collection)
+        external
+        view
+        returns (
+            uint256 br,
+            uint256 ir,
+            uint256 lr
+        )
+    {
+        br = borrowRate[collection];
+        ir = interestRate[collection];
+        lr = limitRate[collection];
+    }
+
     /*** Admin role ***/
 
     modifier onlyAdmin() {
@@ -483,7 +572,11 @@ contract HoneyBorrow {
     }
 
     function withdraw() external onlyAdmin {
-        uint256 amount = IERC20(avaxAddress).balanceOf(address(this));
-        IERC20(avaxAddress).transfer(msg.sender, amount);
+        uint256 amount = address(this).balance;
+        payable(msg.sender).transfer(amount);
+    }
+    
+    receive() external payable {
+
     }
 }
